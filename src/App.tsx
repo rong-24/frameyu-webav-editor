@@ -11,6 +11,9 @@ import { DEFAULT_WAVEFORM_DISPLAY_SETTINGS, normaliseWaveformDisplaySettings, ty
 import { hashMediaFile, MediaContentDeduplicator } from './editor/videoDedup';
 import { FULL_SOURCE_CROP, getSourceCrop, moveSourceCrop, resizeSourceCrop } from './editor/sourceCrop';
 import { normaliseMp4Filename } from './export/exportFile';
+import { SmartEditPanel } from './ai/SmartEditPanel';
+import { applyTransaction, undoTransaction } from './ai/applyPlan';
+import type { MediaInfo, Plan } from '../shared/plan.mjs';
 
 const initialEditor: EditorState = { playheadMs: 0, zoom: 100, playback: 'idle', status: 'ready', message: '等待导入视频素材' };
 const formatTime = (timeMs: number) => `${String(Math.floor(timeMs / 60000)).padStart(2, '0')}:${String(Math.floor(timeMs / 1000) % 60).padStart(2, '0')}.${String(Math.floor(timeMs % 1000 / 10)).padStart(2, '0')}`;
@@ -75,6 +78,7 @@ export default function App() {
   const timelinePreviewCacheRef = useRef(new TimelineMediaPreviewCache());
   const cacheDisposeTimerRef = useRef<number>();
   const adapterRef = useRef<WebAVAdapter>();
+  const aiApplyingRef = useRef(false);
   const durationRef = useRef(0);
   const projectRef = useRef<Project>(emptyProject());
   const layoutDragRef = useRef<LayoutDrag>();
@@ -108,6 +112,9 @@ export default function App() {
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [exportFilename, setExportFilename] = useState('frameyu-demo');
   const [exportSaveMode, setExportSaveMode] = useState<ExportSaveMode>('download');
+  const [propertyTab, setPropertyTab] = useState<'properties' | 'ai'>('properties');
+  const [aiApplying, setAiApplying] = useState(false);
+  const [aiUndoSnapshot, setAiUndoSnapshot] = useState<{ before: Project; after: Project; selectedClipId?: string; selectedTrackId: string; playheadMs: number }>();
   const renderedProjectRef = useRef(project);
   const projectRevisionRef = useRef(0);
   if (renderedProjectRef.current !== project) {
@@ -121,6 +128,7 @@ export default function App() {
   const projectDuration = getProjectDuration(project);
   durationRef.current = projectDuration;
   const selected = project.clips.find((clip) => clip.id === editor.selectedClipId);
+  const canUndoAi = aiUndoSnapshot?.after === project;
   const selectedAsset = selected?.assetId ? getAsset(project, selected.assetId) : undefined;
   const selectedVideoLayout = selected?.type === 'video' ? selected.videoLayout ?? defaultVideoLayout(project, selectedAsset) : undefined;
   const cropEditorLayout = cropSession?.clipId === selected?.id ? selectedVideoLayout : undefined;
@@ -290,6 +298,7 @@ export default function App() {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
+      if (aiApplyingRef.current) return;
       if (event.key.toLowerCase() !== 's' || event.ctrlKey || event.metaKey || event.altKey) return;
       const target = event.target;
       if (target instanceof HTMLElement && (target.isContentEditable || target.matches('input, textarea, select, button, [contenteditable="true"]'))) return;
@@ -486,6 +495,44 @@ export default function App() {
     } catch (error) {
       console.error('[WebAV] export failed', error);
       setEditor((previous) => ({ ...previous, status: 'error', message: `导出失败：${error instanceof Error ? error.message : String(error)}` }));
+    }
+  }
+
+  async function applyEditorAiPlan(base: Project, plan: Plan, assets: MediaInfo[]) {
+    if (aiApplyingRef.current || !adapterRef.current || !adapterReady || editor.status !== 'ready' || cropSessionRef.current || dragRef.current) throw Error('编辑器当前不能应用 AI 计划');
+    aiApplyingRef.current = true;
+    setAiApplying(true);
+    adapterRef.current.pause();
+    try {
+      await applyTransaction(base, () => projectRef.current, plan, assets, next => adapterRef.current!.sync(next, 0), next => {
+        projectRef.current = next;
+        setProject(next);
+        setAiUndoSnapshot({ before: base, after: next, selectedClipId: editor.selectedClipId, selectedTrackId, playheadMs: editor.playheadMs });
+        setEditor(previous => ({ ...previous, selectedClipId: undefined, playheadMs: 0, playback: 'paused', message: 'AI 方案已应用；可一次撤销恢复原工程。' }));
+      });
+    } finally {
+      aiApplyingRef.current = false;
+      setAiApplying(false);
+    }
+  }
+
+  async function undoEditorAiPlan() {
+    const snapshot = aiUndoSnapshot;
+    if (!snapshot || aiApplyingRef.current || !adapterRef.current) throw Error('没有可撤销的 AI 应用');
+    aiApplyingRef.current = true;
+    setAiApplying(true);
+    adapterRef.current.pause();
+    try {
+      await undoTransaction(snapshot.before, snapshot.after, () => projectRef.current, previous => adapterRef.current!.sync(previous, snapshot.playheadMs), previous => {
+        projectRef.current = previous;
+        setProject(previous);
+        setAiUndoSnapshot(undefined);
+        setSelectedTrackId(snapshot.selectedTrackId);
+        setEditor(state => ({ ...state, selectedClipId: snapshot.selectedClipId, playheadMs: snapshot.playheadMs, playback: 'paused', message: '已撤销 AI 方案，恢复应用前的完整工程。' }));
+      });
+    } finally {
+      aiApplyingRef.current = false;
+      setAiApplying(false);
     }
   }
 
@@ -1003,8 +1050,16 @@ export default function App() {
           <div className="player-controls"><button aria-label="播放或暂停" disabled={!projectDuration} onClick={togglePlayback}>{editor.playback === 'playing' ? '❚❚ 暂停' : '▶ 播放'}</button><span data-testid="project-duration" data-duration-ms={projectDuration}>{formatTime(editor.playheadMs)} / {formatTime(projectDuration)}</span><input aria-label="播放位置" disabled={!projectDuration} type="range" min="0" max={projectDuration || 1} value={editor.playheadMs} onChange={(event) => void syncAndSeek(Number(event.target.value))} /></div>
         </section>
         <Divider kind="property" onPointerDown={startLayoutDrag} onDoubleClick={() => setLayout((previous) => ({ ...previous, propertyWidth: DEFAULT_WORKSPACE_LAYOUT.propertyWidth }))} />
-        <aside className="property-panel panel"><h2>属性</h2>{selected ? <Properties clip={selected} asset={selectedAsset} project={project} projectDuration={projectDuration} onUpdate={updateSelected} onTrim={trimSelected} onSetPlaybackRate={setSelectedPlaybackRate} onUpdateVideoLayout={updateSelectedVideoLayout} onSetVideoLayoutMode={setSelectedVideoLayoutMode} onStartCrop={startCropMode} cropEditing={cropSession?.clipId === selected.id} onDelete={() => { setProject((previous) => removeClip(previous, selected.id)); setEditor((previous) => ({ ...previous, selectedClipId: undefined })); }} /> : <p className="empty">选择时间轴片段以编辑属性</p>}</aside>
+        <aside className="property-panel panel">
+          <div className="property-tabs" role="tablist" aria-label="右侧面板">
+            <button role="tab" aria-selected={propertyTab === 'properties'} onClick={() => setPropertyTab('properties')}>属性</button>
+            <button role="tab" aria-selected={propertyTab === 'ai'} onClick={() => setPropertyTab('ai')}>AI 助手</button>
+          </div>
+          <div className="property-tab-content" hidden={propertyTab !== 'properties'}>{selected ? <Properties clip={selected} asset={selectedAsset} project={project} projectDuration={projectDuration} onUpdate={updateSelected} onTrim={trimSelected} onSetPlaybackRate={setSelectedPlaybackRate} onUpdateVideoLayout={updateSelectedVideoLayout} onSetVideoLayoutMode={setSelectedVideoLayoutMode} onStartCrop={startCropMode} cropEditing={cropSession?.clipId === selected.id} onDelete={() => { setProject((previous) => removeClip(previous, selected.id)); setEditor((previous) => ({ ...previous, selectedClipId: undefined })); }} /> : <p className="empty">选择时间轴片段以编辑属性</p>}</div>
+          <div className="property-tab-content editor-ai-content" hidden={propertyTab !== 'ai'}><SmartEditPanel editorIntegration project={project} selectedClipId={editor.selectedClipId} files={assetFilesRef.current} disabled={!adapterReady || editor.status !== 'ready' || !!cropSession || aiApplying} onApply={applyEditorAiPlan} canUndo={canUndoAi} onUndo={undoEditorAiPlan} /></div>
+        </aside>
       </section>
+      {propertyTab !== 'ai' && <button className="editor-ai-float" style={{ bottom: `${layout.timelineHeight + 22}px` }} aria-label="打开 AI 助手" onClick={() => setPropertyTab('ai')}>✦ AI</button>}
       <Divider kind="timeline" onPointerDown={startLayoutDrag} onDoubleClick={() => setLayout((previous) => ({ ...previous, timelineHeight: DEFAULT_WORKSPACE_LAYOUT.timelineHeight }))} />
       <section className="timeline-panel panel" style={{ height: `${layout.timelineHeight}px` }}>
         <div className="timeline-toolbar"><b>时间轴</b><div className="timeline-actions"><button aria-label="分割选中片段" disabled={!selected || !canSplitTimelineClip(project, selected.id, editor.playheadMs)} onClick={() => splitClipAtPlayhead()}>分割</button><button onClick={() => createTrack('caption')}>+ 字幕轨</button><button onClick={() => createTrack('video')}>+ 视频轨</button><button onClick={() => createTrack('music')}>+ 音乐轨</button><button onClick={() => createTrack('sfx')}>+ 音效轨</button><label>波形 <select aria-label="波形显示模式" value={waveformDisplaySettings.mode} onChange={(event) => setWaveformDisplaySettings((previous) => ({ ...previous, mode: event.target.value as WaveformDisplaySettings['mode'] }))}><option value="linear">线性</option><option value="enhanced">增强</option></select></label><label>增益 <input aria-label="波形显示增益" type="range" min="1" max="5" step="0.05" value={waveformDisplaySettings.gain} onChange={(event) => setWaveformDisplaySettings((previous) => ({ ...previous, gain: Number(event.target.value) }))} /></label><label>对比 <input aria-label="波形显示对比度" type="range" min="0.7" max="1.6" step="0.02" value={waveformDisplaySettings.contrast} onChange={(event) => setWaveformDisplaySettings((previous) => ({ ...previous, contrast: Number(event.target.value) }))} /></label><button aria-label="恢复默认波形显示" onClick={() => setWaveformDisplaySettings(DEFAULT_WAVEFORM_DISPLAY_SETTINGS)}>重置波形</button><label>缩放 <input aria-label="时间轴缩放" type="range" min="45" max="240" value={editor.zoom} onChange={(event) => setEditor((previous) => ({ ...previous, zoom: Number(event.target.value) }))} /></label></div></div>
@@ -1017,6 +1072,7 @@ export default function App() {
       {duplicateMediaImport && <DuplicateMediaDialog duplicate={duplicateMediaImport} onLocate={() => locateDuplicateMedia(duplicateMediaImport.assetId)} onClose={() => setDuplicateMediaImport(undefined)} />}
       {materialLibraryType && <MaterialLibraryDialog type={materialLibraryType} onUpload={() => uploadFromMaterialLibrary(materialLibraryType)} onClose={() => setMaterialLibraryType(undefined)} />}
       {exportDialogOpen && <ExportDialog filename={exportFilename} saveMode={exportSaveMode} supportsSavePicker={'showSaveFilePicker' in window} onFilenameChange={setExportFilename} onSaveModeChange={setExportSaveMode} onConfirm={() => void exportVideo()} onClose={() => setExportDialogOpen(false)} />}
+      {aiApplying && <div className="editor-ai-applying" role="status">正在同步 AI 剪辑方案，请稍候…</div>}
     </div>
   </main>;
 }

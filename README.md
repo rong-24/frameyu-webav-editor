@@ -1,19 +1,45 @@
 # 帧语智能编辑器 WebAV Demo
 
-浏览器本地视频编辑 Demo：导入多个 MP4 视频素材，顺序剪辑或加入多个视频轨叠加；再添加 MP3/WAV 背景音乐或音效、手动字幕，在 WebAV 画布预览后导出烧录字幕和混音的 MP4。媒体不会上传到服务端。
+## macOS：在终端启动新版 Editor
 
-## 启动
-
-当前开发环境的 Node 22 安装在 `/home/lth/.local/node/bin`。新终端先执行：
+先安装 Node.js **22.10 或更新版本**（包含 npm）。在项目终端执行以下命令；`npm ci` 只需在首次启动或依赖更新后运行：
 
 ```bash
 export PATH=/home/lth/.local/node/bin:$PATH
 cd /home/lth/webav/v1.0/editor-demo
-npm install
-npm run dev -- --host 0.0.0.0
+node --version
+npm ci
+npm run dev:ai:mock
 ```
 
-通过 VS Code Remote 的端口转发，在桌面 Chrome 或 Edge 打开 `http://localhost:5173`。首次验证使用短 H.264/AAC MP4（≤30 秒、720p）及 MP3/WAV（≤60 秒）。
+启动后，在 Mac 的 Chrome 或 Edge 打开 **http://127.0.0.1:5173/editor**。这是保留原版剪辑工作台并加入 AI 助手的页面；导入视频后，点击右侧“AI 助手”标签或右下角“✦ AI”。默认 Mock 模式可在本机抽帧并演示计划生成，不调用付费模型。结束服务时，在运行命令的终端按 `Control + C`。
+
+上述 `/home/lth/...` 是**远程服务器**上的项目路径。如果终端运行在 Mac 本机，请把 `cd` 后的路径改成 Mac 上实际的项目目录。如果终端连接的是远程服务器（例如 VS Code 远程终端），请先在 IDE 中转发 **5173** 端口，再用 Mac 浏览器打开上述地址。`npm run dev:ai:mock` 会同时启动网页和 AI Mock 服务；单独运行 `npm run dev` 无法完成 AI Mock 流程。
+
+如需连接真实 API，在项目目录执行 `cp server/.env.example server/.env`，仅在运行服务的机器上编辑 `server/.env` 填入 `DEEPSEEK_API_KEY` 和 `GLM_API_KEY`，停止 Mock 服务后运行 `npm run dev:ai`。进入页面后还需主动切换“真实 API”并确认发送抽帧；启动服务本身不会调用付费模型。
+
+Windows 用户参见 [Windows 完整操作说明](docs/OPERATION-GUIDE.zh-CN.md)。
+
+本版保留两个独立编辑入口，不合并界面；当前工程不在两个页面之间同步。AI 助手已接入原版 `/editor` 右侧属性区；`/studio` 仍保留供对照。
+
+浏览器本地视频编辑 Demo：导入多个 MP4 视频素材，顺序剪辑或加入多个视频轨叠加；再添加 MP3/WAV 背景音乐或音效、手动字幕，在 WebAV 画布预览后导出烧录字幕和混音的 MP4。手动编辑与 Mock 模式在本机处理；真实 AI 模式仅在用户确认后发送有限抽帧和必要描述，不上传完整视频或音频。
+
+## Windows 启动与本次适配
+
+本目录基于 GitHub main 的 64924704ae288aba0e95b8f229e8f19e182152b9，保留其素材抽屉、裁剪性能优化和导出配置，并接入本地首页、Studio 智能剪辑及 Windows 启动器。详细记录见 [适配报告](docs/INTEGRATION-20261021.md)。
+
+1. 安装 Node.js 22.10+（含 npm），在包含 package.json 的目录运行 `npm.cmd ci`。
+2. 双击 `start-ai-mock.cmd`，或运行 `npm.cmd run dev:ai:mock`。
+3. 在 Chrome / Edge 打开 http://127.0.0.1:5173/editor 使用原版剪辑工作台及 AI 助手；首页“创作”目前仍进入 `/studio`。
+4. 真实联调按 [Windows AI 启动说明](WINDOWS-AI-启动说明.md) 在本机填写 server/.env 并使用 `start-ai-real.cmd`。本次没有调用付费 API。
+
+如果提示 npm 不存在，双击启动器会寻找已安装的 Node，直接启动已有依赖；首次安装依赖仍需含 npm 的 Node.js。不要同时运行旧目录和新目录的默认服务，二者都占用 5173 / 8787。
+
+以下功能列表主要描述 `/editor`。两个页面共享工程类型及 WebAV 引擎，但各自维护工程状态。
+
+### 原版 Editor 中使用 AI
+
+在 `/editor` 导入视频后，点击右侧“AI 助手”标签或右下角“✦ AI”。默认是 Mock 与“辅助修改当前工程”：可选择当前素材、本机抽帧、确认运行并审阅方案；此模式不会改动工程，因为局部编辑工具尚未接入。若要应用现有顺序拼接计划，显式切换“生成全新剪辑方案”，重新抽帧并生成方案，点击替换后再次确认。该操作替换全部时间线片段（含音乐、字幕），保存应用前的完整 Project 快照；在后续手动修改前，可点“撤销本次 AI 应用”一次恢复。面板切换不会重建 AVCanvas。真实 API 仍需用户主动切换模式并确认发送，详见[操作说明](docs/OPERATION-GUIDE.zh-CN.md)。
 
 ## 功能范围
 
@@ -37,7 +63,7 @@ npm run dev -- --host 0.0.0.0
 - “+ 音乐 / + 音效”与波形分析完全解耦：单击立即创建一个工程片段，可在首条视频导入前暂存；视频加入后再按视频项目时长应用常规边界。每次点击均有 `[TimelineAdd]` 控制台追踪，缺少对应轨道会显示错误而非静默失败。
 - 选中视频、背景音乐或音效片段后，可将播放头置于片段内部，通过工具栏“分割”、右键菜单或非输入焦点下的 `S` 分割。左右片段拥有独立 ID、保持原轨道/素材/音量/视频布局；字幕不支持分割。
 - 视频、背景音乐和音效片段支持 0.5×、0.75×、1×、1.25×、1.5×、2×。工程时长与源媒体截取时长分别保存；变速保留源区间并重算时间轴占用长度。同轨视频减速若会重叠会被拒绝。WebAV 1.2.8 使用线性插值处理音频变速，音调会随速度改变。
-- 当前不包含转场、遮罩、色度抠图、关键帧动画、自动字幕、FFmpeg、云端保存、撤销重做、波形或移动端适配。
+- 当前不包含转场、遮罩、色度抠图、关键帧动画、语音识别、FFmpeg 或云端保存。/editor 仅支持当前 AI 应用的一次快照撤销，没有通用手动编辑撤销栈；/studio 支持会话内撤销重做。编辑器主要面向桌面窗口。
 
 ## 架构
 
@@ -53,17 +79,12 @@ npm run dev -- --host 0.0.0.0
 npm run typecheck
 npm run test
 npm run build
-PLAYWRIGHT_BROWSERS_PATH=0 npm run test:e2e
+# Windows PowerShell，使用已安装的 Edge
+$env:PLAYWRIGHT_CHANNEL='msedge'
+npm.cmd run test:e2e -- --workers=1
 ```
 
-远程 Ubuntu 无 sudo 权限，因此可先在项目内解包 Chromium 所需运行库，再执行：
-
-```bash
-./scripts/setup-playwright-libs.sh
-npm run test:e2e:local-libs
-```
-
-该方案已使 Playwright Chromium 成功启动。但当前远程无头 Chromium 不提供完整 WebCodecs（`VideoDecoder`、`VideoEncoder`、`AudioDecoder`、`AudioEncoder` 均缺失），E2E 会明确显示为 **skipped**，而不应当当作真实导出通过。请使用本机 Chrome/Edge 经端口转发执行下列手工验证。
+E2E 自动启动独立的本机 5175 / 8789 测试服务，不读取 .env，禁止上游网络请求，也不复用旧服务。本次 Windows Edge 的 13 项测试全部通过，含真实本地 MP4 编码和重新解码；这不代表真实 AI API 已验证。
 
 ## 手工验证清单
 
